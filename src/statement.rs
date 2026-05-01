@@ -1,25 +1,113 @@
-pub enum StatementType {
-    Insert,
+use std::collections::BTreeMap;
+
+#[derive(Debug)]
+pub struct Row {
+    pub id: u32,
+    pub username: String,
+    pub email: String,
 }
 
+#[derive(Debug)]
+pub enum StatementType {
+    Insert(Row),
+    Select,
+}
+
+#[derive(Debug)]
 pub struct Statement {
     pub statement_type: StatementType,
 }
 
+pub struct Table {
+    pub rows: BTreeMap<u32, Row>,
+}
+
+impl Table {
+    pub fn new() -> Self {
+        Table {
+            rows: BTreeMap::new(),
+        }
+    }
+}
+
 pub fn prepare_statement(input: &str) -> Result<Statement, String> {
     if input.starts_with("insert") {
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        if parts.len() != 4 {
+            return Err("Syntax error. Expected: insert <id> <username> <email>".to_string());
+        }
+
+        let id = parts[1]
+            .parse::<u32>()
+            .map_err(|_| "ID must be a positive integer".to_string())?;
+        let username = parts[2].to_string();
+        let email = parts[3].to_string();
+
         Ok(Statement {
-            statement_type: StatementType::Insert,
+            statement_type: StatementType::Insert(Row {
+                id,
+                username,
+                email,
+            }),
+        })
+    } else if input.starts_with("select") {
+        Ok(Statement {
+            statement_type: StatementType::Select,
         })
     } else {
         Err(format!("Unrecognized keyword at start of '{}'", input))
     }
 }
 
-pub fn execute_statement(statement: &Statement) {
+pub fn execute_statement(statement: Statement, table: &mut Table) {
     match statement.statement_type {
-        StatementType::Insert => {
-            println!("Executed insert.");
+        StatementType::Insert(row) => {
+            let id = row.id;
+            table.rows.insert(id, row);
         }
+        StatementType::Select => {
+            for (_, row) in table.rows.iter() {
+                println!("({}, {}, {})", row.id, row.username, row.email);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prepare_insert_success() {
+        let stmt = prepare_statement("insert 1 tester tester@testing.org").unwrap();
+        match stmt.statement_type {
+            StatementType::Insert(row) => {
+                assert_eq!(row.id, 1);
+                assert_eq!(row.username, "tester");
+                assert_eq!(row.email, "tester@testing.org");
+            }
+            _ => panic!("Expected Insert statement"),
+        }
+    }
+
+    #[test]
+    fn test_prepare_select_success() {
+        let stmt = prepare_statement("select").unwrap();
+        assert!(matches!(stmt.statement_type, StatementType::Select));
+    }
+
+    #[test]
+    fn test_prepare_insert_negative_id() {
+        let err = prepare_statement("insert -1 tester tester@testing.org").unwrap_err();
+        assert_eq!(err, "ID must be a positive integer");
+    }
+
+    #[test]
+    fn test_prepare_insert_syntax_error() {
+        let err = prepare_statement("insert 1 tester").unwrap_err();
+        assert_eq!(
+            err,
+            "Syntax error. Expected: insert <id> <username> <email>"
+        );
     }
 }

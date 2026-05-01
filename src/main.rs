@@ -22,6 +22,8 @@ fn spawn_input_handler()
         stdout.write_all(prompt_string.as_bytes()).await?;
         stdout.flush().await?;
 
+        let mut table = statement::Table::new();
+
         while let Some(line) = reader.next_line().await? {
             let command = line.trim();
 
@@ -33,7 +35,7 @@ fn spawn_input_handler()
                 }
             } else {
                 match statement::prepare_statement(command) {
-                    Ok(stmt) => statement::execute_statement(&stmt),
+                    Ok(stmt) => statement::execute_statement(stmt, &mut table),
                     Err(e) => println!("{}", e),
                 }
             }
