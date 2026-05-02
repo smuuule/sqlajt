@@ -1,11 +1,4 @@
-use std::collections::BTreeMap;
-
-#[derive(Debug)]
-pub struct Row {
-    pub id: u32,
-    pub username: String,
-    pub email: String,
-}
+use crate::database::{Cursor, Row, Table};
 
 #[derive(Debug)]
 pub enum StatementType {
@@ -16,18 +9,6 @@ pub enum StatementType {
 #[derive(Debug)]
 pub struct Statement {
     pub statement_type: StatementType,
-}
-
-pub struct Table {
-    pub rows: BTreeMap<u32, Row>,
-}
-
-impl Table {
-    pub fn new() -> Self {
-        Table {
-            rows: BTreeMap::new(),
-        }
-    }
 }
 
 pub fn prepare_statement(input: &str) -> Result<Statement, String> {
@@ -62,12 +43,15 @@ pub fn prepare_statement(input: &str) -> Result<Statement, String> {
 pub fn execute_statement(statement: Statement, table: &mut Table) {
     match statement.statement_type {
         StatementType::Insert(row) => {
-            let id = row.id;
-            table.rows.insert(id, row);
+            let mut cursor = Cursor::table_end(table);
+            cursor.insert_row(row);
         }
         StatementType::Select => {
-            for (_, row) in table.rows.iter() {
+            let mut cursor = Cursor::table_start(table);
+            while !cursor.end_of_table {
+                let row = cursor.get_row();
                 println!("({}, {}, {})", row.id, row.username, row.email);
+                cursor.advance();
             }
         }
     }

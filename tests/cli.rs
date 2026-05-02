@@ -1,9 +1,12 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use tempfile::NamedTempFile;
 
 #[test]
 fn test_cli_insert_and_select() {
+    let temp_file = NamedTempFile::new().unwrap();
     let mut cmd = Command::cargo_bin("sqlajt").unwrap();
+    cmd.arg(temp_file.path());
 
     let input = "insert 1 tester tester@testing.org\nselect\n.exit\n";
 
@@ -15,7 +18,9 @@ fn test_cli_insert_and_select() {
 
 #[test]
 fn test_cli_negative_id() {
+    let temp_file = NamedTempFile::new().unwrap();
     let mut cmd = Command::cargo_bin("sqlajt").unwrap();
+    cmd.arg(temp_file.path());
 
     let input = "insert -1 tester tester@testing.org\n.exit\n";
 
@@ -27,7 +32,9 @@ fn test_cli_negative_id() {
 
 #[test]
 fn test_cli_syntax_error() {
+    let temp_file = NamedTempFile::new().unwrap();
     let mut cmd = Command::cargo_bin("sqlajt").unwrap();
+    cmd.arg(temp_file.path());
 
     let input = "insert 1 tester\n.exit\n";
 
