@@ -1,15 +1,47 @@
+use std::convert::TryInto;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-const ID_SIZE: usize = 4;
-const USERNAME_SIZE: usize = 32;
-const EMAIL_SIZE: usize = 255;
-const ROW_SIZE: usize = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
-const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
+pub const PAGE_SIZE: usize = 4096;
 const MAX_PAGES: usize = 100;
 
-pub const PAGE_SIZE: usize = 4096;
+#[derive(Debug, Clone, PartialEq)]
+pub enum DataType {
+    Int,
+    Text,
+}
+
+#[derive(Debug, Clone)]
+pub enum Value {
+    Int(i32),
+    Text(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct Column {
+    pub name: String,
+    pub data_type: DataType,
+}
+
+#[derive(Debug, Clone)]
+pub struct Schema {
+    pub columns: Vec<Column>,
+    pub row_size: usize,
+}
+
+impl Schema {
+    pub fn new(columns: Vec<Column>) -> Self {
+        let mut row_size = 0;
+        for col in &columns {
+            match col.data_type {
+                DataType::Int => row_size += 4,
+                DataType::Text => row_size += 256,
+            }
+        }
+        Schema { columns, row_size }
+    }
+}
 
 pub struct Page {
     pub data: [u8; PAGE_SIZE],
@@ -23,56 +55,10 @@ impl Page {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Row {
-    pub id: u32,
-    pub username: String,
-    pub email: String,
-}
-
-impl Row {
-    pub fn serialize(&self, dest: &mut [u8]) {
-        dest[0..4].copy_from_slice(&self.id.to_ne_bytes());
-        dest[4..ROW_SIZE].fill(0);
-
-        let u_bytes = self.username.as_bytes();
-        let u_len = u_bytes.len().min(USERNAME_SIZE);
-        dest[4..4 + u_len].copy_from_slice(&u_bytes[..u_len]);
-
-        let e_bytes = self.email.as_bytes();
-        let e_len = e_bytes.len().min(EMAIL_SIZE);
-        dest[4 + USERNAME_SIZE..4 + USERNAME_SIZE + e_len].copy_from_slice(&e_bytes[..e_len]);
-    }
-
-    pub fn deserialize(src: &[u8]) -> Self {
-        let id = u32::from_ne_bytes(src[0..4].try_into().unwrap());
-
-        let username_slice = &src[4..4 + USERNAME_SIZE];
-        let username_len = username_slice
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(USERNAME_SIZE);
-        let username = String::from_utf8_lossy(&username_slice[..username_len]).into_owned();
-
-        let email_slice = &src[4 + USERNAME_SIZE..4 + USERNAME_SIZE + EMAIL_SIZE];
-        let email_len = email_slice
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(EMAIL_SIZE);
-        let email = String::from_utf8_lossy(&email_slice[..email_len]).into_owned();
-
-        Row {
-            id,
-            username,
-            email,
-        }
-    }
-}
-
 pub struct Pager {
     pub file: File,
-    pub file_length: u64,
     pub pages: Vec<Option<Page>>,
+    pub num_pages: u32,
 }
 
 impl Pager {
@@ -82,29 +68,26 @@ impl Pager {
         for _ in 0..MAX_PAGES {
             pages.push(None);
         }
+        let num_pages = if file_length == 0 {
+            0
+        } else {
+            (file_length as usize / PAGE_SIZE) as u32
+        };
 
         Pager {
             file,
-            file_length,
             pages,
+            num_pages,
         }
     }
 
-    pub fn get_page(&mut self, page_num: usize) -> &mut Page {
-        if page_num >= MAX_PAGES {
-            panic!("Page number out of bounds.");
-        }
-
-        if self.pages[page_num].is_none() {
+    pub fn get_page(&mut self, page_num: u32) -> &mut Page {
+        let page_num_us = page_num as usize;
+        if self.pages[page_num_us].is_none() {
             let mut page = Page::new();
-            let mut num_pages = (self.file_length / PAGE_SIZE as u64) as usize;
-            if !self.file_length.is_multiple_of(PAGE_SIZE as u64) {
-                num_pages += 1;
-            }
-
-            if page_num <= num_pages {
+            if page_num < self.num_pages {
                 self.file
-                    .seek(SeekFrom::Start((page_num * PAGE_SIZE) as u64))
+                    .seek(SeekFrom::Start((page_num_us * PAGE_SIZE) as u64))
                     .unwrap();
                 let mut bytes_read = 0;
                 while bytes_read < PAGE_SIZE {
@@ -122,18 +105,17 @@ impl Pager {
                     }
                 }
             }
-            self.pages[page_num] = Some(page);
+            self.pages[page_num_us] = Some(page);
         }
-
-        self.pages[page_num].as_mut().unwrap()
+        self.pages[page_num_us].as_mut().unwrap()
     }
 
-    pub fn flush(&mut self, page_num: usize, size: usize) {
-        if let Some(page) = &self.pages[page_num] {
+    pub fn flush(&mut self, page_num: u32) {
+        if let Some(page) = &self.pages[page_num as usize] {
             self.file
-                .seek(SeekFrom::Start((page_num * PAGE_SIZE) as u64))
+                .seek(SeekFrom::Start((page_num as usize * PAGE_SIZE) as u64))
                 .unwrap();
-            self.file.write_all(&page.data[0..size]).unwrap();
+            self.file.write_all(&page.data).unwrap();
             self.file.flush().unwrap();
         }
     }
@@ -141,82 +123,132 @@ impl Pager {
 
 pub struct Table {
     pub pager: Pager,
-    pub num_rows: usize,
+    pub schema: Option<Schema>,
+    pub num_rows: u32,
 }
 
 impl Table {
-    pub fn new(file: File) -> Self {
-        let pager = Pager::new(file);
-        let num_rows = (pager.file_length / ROW_SIZE as u64) as usize;
-        Table { pager, num_rows }
-    }
+    pub fn new(mut pager: Pager) -> Self {
+        let mut num_rows = 0;
+        let mut schema = None;
 
-    fn row_slot(&mut self, row_num: usize) -> (&mut [u8], usize) {
-        let page_num = row_num / ROWS_PER_PAGE;
-        let page = self.pager.get_page(page_num);
-        let row_offset = (row_num % ROWS_PER_PAGE) * ROW_SIZE;
-        (&mut page.data, row_offset)
+        if pager.num_pages > 0 {
+            let page = pager.get_page(0);
+            num_rows = u32::from_le_bytes(page.data[0..4].try_into().unwrap());
+            let num_columns = u32::from_le_bytes(page.data[4..8].try_into().unwrap());
+
+            if num_columns > 0 {
+                let mut columns = Vec::new();
+                let mut offset = 8;
+                for _ in 0..num_columns {
+                    let dt = if page.data[offset] == 0 {
+                        DataType::Int
+                    } else {
+                        DataType::Text
+                    };
+                    offset += 1;
+
+                    let name_len = page.data[offset] as usize;
+                    offset += 1;
+
+                    let name = String::from_utf8(page.data[offset..offset + name_len].to_vec())
+                        .unwrap_or_default();
+                    offset += name_len;
+
+                    columns.push(Column {
+                        name,
+                        data_type: dt,
+                    });
+                }
+                schema = Some(Schema::new(columns));
+            }
+        } else {
+            // Page 0 for metadata
+            pager.num_pages = 1;
+            pager.get_page(0);
+        }
+
+        Table {
+            pager,
+            schema,
+            num_rows,
+        }
     }
 
     pub fn close(&mut self) {
-        let num_full_pages = self.num_rows / ROWS_PER_PAGE;
-        for i in 0..num_full_pages {
-            if self.pager.pages[i].is_some() {
-                self.pager.flush(i, PAGE_SIZE);
-            }
-        }
-
-        let num_additional_rows = self.num_rows % ROWS_PER_PAGE;
-        if num_additional_rows > 0 {
-            let page_num = num_full_pages;
-            if self.pager.pages[page_num].is_some() {
-                self.pager.flush(page_num, num_additional_rows * ROW_SIZE);
+        self.save_metadata();
+        for i in 0..self.pager.num_pages {
+            if self.pager.pages[i as usize].is_some() {
+                self.pager.flush(i);
             }
         }
     }
-}
 
-pub struct Cursor<'a> {
-    pub table: &'a mut Table,
-    pub row_num: usize,
-    pub end_of_table: bool,
-}
+    pub fn save_metadata(&mut self) {
+        let page = self.pager.get_page(0);
+        page.data[0..4].copy_from_slice(&self.num_rows.to_le_bytes());
 
-impl<'a> Cursor<'a> {
-    pub fn table_start(table: &'a mut Table) -> Self {
-        let end_of_table = table.num_rows == 0;
-        Cursor {
-            table,
-            row_num: 0,
-            end_of_table,
+        if let Some(schema) = &self.schema {
+            let num_cols = schema.columns.len() as u32;
+            page.data[4..8].copy_from_slice(&num_cols.to_le_bytes());
+
+            let mut offset = 8;
+            for col in &schema.columns {
+                page.data[offset] = match col.data_type {
+                    DataType::Int => 0,
+                    DataType::Text => 1,
+                };
+                offset += 1;
+
+                let name_bytes = col.name.as_bytes();
+                page.data[offset] = name_bytes.len() as u8;
+                offset += 1;
+
+                page.data[offset..offset + name_bytes.len()].copy_from_slice(name_bytes);
+                offset += name_bytes.len();
+            }
+        } else {
+            page.data[4..8].copy_from_slice(&0u32.to_le_bytes());
         }
     }
 
-    pub fn table_end(table: &'a mut Table) -> Self {
-        let row_num = table.num_rows;
-        Cursor {
-            table,
-            row_num,
-            end_of_table: true,
+    pub fn insert_row(&mut self, values: Vec<Value>) -> Result<(), String> {
+        let schema = self.schema.as_ref().ok_or("No table created")?;
+
+        let rows_per_page = PAGE_SIZE / schema.row_size;
+        let page_num = 1 + (self.num_rows / rows_per_page as u32);
+
+        if page_num >= self.pager.num_pages {
+            self.pager.num_pages = page_num + 1;
         }
-    }
 
-    pub fn get_row(&mut self) -> Row {
-        let (page_data, row_offset) = self.table.row_slot(self.row_num);
-        Row::deserialize(&page_data[row_offset..row_offset + ROW_SIZE])
-    }
+        let page = self.pager.get_page(page_num);
+        let row_offset = ((self.num_rows as usize) % rows_per_page) * schema.row_size;
 
-    pub fn insert_row(&mut self, row: Row) {
-        let (page_data, row_offset) = self.table.row_slot(self.row_num);
-        row.serialize(&mut page_data[row_offset..row_offset + ROW_SIZE]);
-        self.table.num_rows += 1;
-    }
+        let mut byte_offset = row_offset;
 
-    pub fn advance(&mut self) {
-        self.row_num += 1;
-        if self.row_num >= self.table.num_rows {
-            self.end_of_table = true;
+        for (i, val) in values.iter().enumerate() {
+            let col = &schema.columns[i];
+            match (val, &col.data_type) {
+                (Value::Int(n), DataType::Int) => {
+                    page.data[byte_offset..byte_offset + 4].copy_from_slice(&n.to_le_bytes());
+                    byte_offset += 4;
+                }
+                (Value::Text(s), DataType::Text) => {
+                    let bytes = s.as_bytes();
+                    let len = std::cmp::min(bytes.len(), 255);
+                    page.data[byte_offset] = len as u8;
+                    page.data[byte_offset + 1..byte_offset + 1 + len]
+                        .copy_from_slice(&bytes[..len]);
+                    byte_offset += 256;
+                }
+                _ => return Err("Type mismatch".to_string()),
+            }
         }
+
+        self.num_rows += 1;
+        self.save_metadata();
+        Ok(())
     }
 }
 
@@ -228,6 +260,6 @@ pub fn database_open(filename: &str) -> Result<Table, String> {
         .truncate(false)
         .open(Path::new(filename))
         .map_err(|e| format!("Unable to open file: {}", e))?;
-
-    Ok(Table::new(file))
+    let pager = Pager::new(file);
+    Ok(Table::new(pager))
 }
