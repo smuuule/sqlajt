@@ -14,9 +14,9 @@ fn spawn_input_handler(
         let mut reader = tokio::io::BufReader::new(std_in).lines();
         let mut stdout = tokio::io::BufWriter::new(std_out);
 
-        let start_string = concat!(
-            "SQLajt version 0.0.1\n",
-            "Enter \".help\" for usage hints.\n",
+        let start_string = format!(
+            "SQLajt version {}\nEnter \".help\" for usage hints.\n",
+            env!("CARGO_PKG_VERSION")
         );
         let prompt_string = "sqlajt> ";
 
